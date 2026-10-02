@@ -11,3 +11,23 @@ build/
 venv/
 .idea/
 .vscode/
+
+# Scanner runtime data
+backend/data/scans/
+backend/.venv/
+
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+
+# Temp media
+docs/demo_frames/
+*.mp4
+!**/fixtures/**/*.mp4
+android/build_log.txt
+backend/**/__pycache__/

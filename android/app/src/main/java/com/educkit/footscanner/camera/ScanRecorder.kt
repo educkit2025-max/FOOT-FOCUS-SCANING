@@ -3,7 +3,12 @@ package com.educkit.footscanner.camera
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
 import android.util.Size
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -18,23 +23,21 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
-import java.util.concurrent.Executors
+import kotlin.math.max
 
-/**
- * CameraX helper tuned for Pixel 3a Milestone 1:
- * rear camera only, zoom forced to 1x, prefer HD video.
- */
+data class LensInfo(val focalMm: Float?, val sensorLongMm: Float?)
+
+/** CameraX helper for the Pixel 3a: rear camera, zoom fixed at 1x, HD video. */
 class ScanRecorder(private val context: Context) {
-    private val executor = Executors.newSingleThreadExecutor()
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
-    private var cameraControl: androidx.camera.core.CameraControl? = null
+    private var camera: Camera? = null
 
-    fun hasPermissions(): Boolean {
-        val cam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-        val mic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-        return cam == PackageManager.PERMISSION_GRANTED && mic == PackageManager.PERMISSION_GRANTED
-    }
+    var lens: LensInfo = LensInfo(null, null)
+        private set
+
+    fun hasPermissions(): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
     fun bind(previewView: PreviewView, lifecycleOwner: LifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -52,28 +55,29 @@ class ScanRecorder(private val context: Context) {
                 .build()
             videoCapture = VideoCapture.withOutput(recorder)
 
-            val selector = CameraSelector.DEFAULT_BACK_CAMERA
-            val camera = provider.bindToLifecycle(
-                lifecycleOwner,
-                selector,
-                preview,
-                videoCapture,
-            )
-            cameraControl = camera.cameraControl
-            cameraControl?.setZoomRatio(1.0f)
-            cameraControl?.setLinearZoom(0f)
+            camera = provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, videoCapture)
+            camera?.cameraControl?.setZoomRatio(1.0f)
+            camera?.cameraControl?.setLinearZoom(0f)
+            lens = readLens()
         }, ContextCompat.getMainExecutor(context))
     }
 
-    fun start(output: File, withAudio: Boolean = false, onEvent: (VideoRecordEvent) -> Unit) {
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun readLens(): LensInfo {
+        val info = camera?.cameraInfo ?: return LensInfo(null, null)
+        return runCatching {
+            val c2 = Camera2CameraInfo.from(info)
+            val focal = c2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
+            val size = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            LensInfo(focal, size?.let { max(it.width, it.height) })
+        }.getOrDefault(LensInfo(null, null))
+    }
+
+    fun start(output: File, onEvent: (VideoRecordEvent) -> Unit) {
         val capture = videoCapture ?: return
-        val pending = capture.output
+        recording = capture.output
             .prepareRecording(context, FileOutputOptions.Builder(output).build())
-        recording = if (withAudio) {
-            pending.withAudioEnabled().start(ContextCompat.getMainExecutor(context), onEvent)
-        } else {
-            pending.start(ContextCompat.getMainExecutor(context), onEvent)
-        }
+            .start(ContextCompat.getMainExecutor(context), onEvent)
     }
 
     fun stop() {

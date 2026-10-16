@@ -14,6 +14,10 @@ from PIL import Image
 
 from app.config import settings
 
+RELATIVE_BLUR_FRACTION = 0.55
+RELATIVE_BLUR_FLOOR = 10.0
+DUPLICATE_VIEW_MAX = 6.0
+
 
 @dataclass
 class FrameScore:
@@ -49,12 +53,14 @@ def _laplacian_sharpness(image_bgr: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _hist_distance(a: np.ndarray, b: np.ndarray) -> float:
-    ha = cv2.calcHist([a], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    hb = cv2.calcHist([b], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-    cv2.normalize(ha, ha)
-    cv2.normalize(hb, hb)
-    return float(cv2.compareHist(ha, hb, cv2.HISTCMP_BHATTACHARYYA))
+def _view_signature(img: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+    return cv2.equalizeHist(gray).astype(np.float32)
+
+
+def _view_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean absolute change of a tiny equalized thumbnail: near zero only when the camera has not moved."""
+    return float(np.abs(_view_signature(a) - _view_signature(b)).mean())
 
 
 def _write_thumbnail(src: Path, dest: Path, max_width: int) -> None:
@@ -83,22 +89,22 @@ def select_frames(
     if not candidates:
         raise RuntimeError("No frames extracted from video")
 
+    images: list[np.ndarray | None] = [cv2.imread(str(p)) for p in candidates]
+    sharpness = [_laplacian_sharpness(img) if img is not None else 0.0 for img in images]
+
+    # Compressed phone video over a plain floor scores far lower than stills, so the cut-off follows
+    # this video's own sharpest frames instead of a fixed value alone.
+    readable = [s for s, img in zip(sharpness, images) if img is not None]
+    if readable:
+        blur_min = max(RELATIVE_BLUR_FLOOR, min(blur_min, RELATIVE_BLUR_FRACTION * float(np.percentile(readable, 90))))
+
     scored: list[FrameScore] = []
-    images: list[np.ndarray] = []
-    for i, path in enumerate(candidates):
-        img = cv2.imread(str(path))
+    for i, (path, img, sharp) in enumerate(zip(candidates, images, sharpness)):
         if img is None:
             scored.append(FrameScore(i, path.name, 0.0, False, "unreadable"))
-            images.append(None)  # type: ignore[arg-type]
             continue
-        sharp = _laplacian_sharpness(img)
-        reason = None
-        selected = True
-        if sharp < blur_min:
-            selected = False
-            reason = "blur"
-        scored.append(FrameScore(i, path.name, sharp, selected, reason))
-        images.append(img)
+        selected = sharp >= blur_min
+        scored.append(FrameScore(i, path.name, sharp, selected, None if selected else "blur"))
 
     # Novelty filter among sharp frames: keep temporally spread unique views.
     sharp_indices = [s.index for s in scored if s.selected]
@@ -118,7 +124,7 @@ def select_frames(
             scored[idx].selected = False
             scored[idx].discard_reason = "unreadable"
             continue
-        if last_img is not None and _hist_distance(last_img, img) < 0.08:
+        if last_img is not None and _view_distance(last_img, img) < DUPLICATE_VIEW_MAX:
             scored[idx].selected = False
             scored[idx].discard_reason = "duplicate_view"
             continue

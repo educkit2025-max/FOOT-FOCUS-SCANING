@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from app.api.guide import router as guide_router
+from app.api.profiles import router as profiles_router
 from app.api.scans import router as scans_router
 from app.config import settings
 
@@ -28,6 +30,8 @@ app.add_middleware(
 )
 
 app.include_router(scans_router)
+app.include_router(profiles_router)
+app.include_router(guide_router)
 
 
 @app.get("/health")

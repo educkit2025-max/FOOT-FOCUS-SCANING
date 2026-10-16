@@ -14,6 +14,10 @@ venv/
 
 # Scanner runtime data
 backend/data/scans/
+backend/data/profiles/
+backend/data/test_*/
+backend/data/models/
+backend/backend/
 backend/.venv/
 
 # Android

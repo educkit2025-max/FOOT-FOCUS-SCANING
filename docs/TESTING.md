@@ -49,8 +49,43 @@ Use the IPv4 of your Wi‑Fi adapter (example `192.168.1.42`).
 6. Success = ~60–80 selected frame thumbnails appear  
 7. Open `backend\data\scans\{scan_id}\selected\` on the PC to see the kept images
 
-### 4) Optional API-only test (no phone)
-Upload any short foot video to `/api/v1/scans` → `/video` → `/process` → `/frames` via the docs page.
+## Length & width in cm (current)
+
+After upload the backend now:
+
+1. Selects ~70 frames  
+2. Detects **A4 paper** (210×297 mm) for metric scale  
+3. Segments the foot  
+4. Computes **length_cm** and **width_cm** (median across frames)  
+5. Returns confidence + notes  
+
+**Required for accurate cm values:** keep a white **A4 sheet** under/around the foot during the 30s scan.
+
+Results appear on the phone **Result** screen and in:
+
+`backend/data/scans/{scan_id}/measurements.json`
+
+
+## Colour 3D foot (FOCUS)
+
+Measurements always come from the A4-calibrated agents. The 3D foot on the result page is built with
+FOCUS-SfM ([OllieBoyne/FOCUS](https://github.com/OllieBoyne/FOCUS)) from 20 frames spread over the
+30 s video, then scaled to the A4-measured foot length:
+
+1. The FOCUS network predicts, per frame, which point of a template foot each pixel shows (TOC),
+   the surface normal and the foot mask.
+2. Matching TOC values link the frames; COLMAP (`pycolmap`) solves the camera positions.
+3. Matched points are triangulated, filtered and meshed (screened Poisson) with the skin colour
+   from the frames.
+
+Setup (once) — see `backend/requirements-focus.txt`. The model file (277 MB) goes to
+`backend/data/models/focus_toc_predictor.pth`. Without it the app shows the calibrated two-view shape.
+
+On this PC (i5-7200U, no GPU) the colour 3D step takes about 3–4 minutes per scan.
+
+Licence: FOCUS is MIT, but its network code comes from DSINE (Imperial College), which allows only
+non-commercial, internal or academic research use. Commercial use of NIKONYX needs a licence from
+researchcontracts.engineering@imperial.ac.uk, or a retrained/replaced network.
 
 ## Branding
 Splash + loading use the **Nikonyx** logo. This remains a standalone test module until you approve Nikonyx integration.

@@ -7,7 +7,9 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
@@ -21,8 +23,8 @@ import java.util.concurrent.TimeUnit
 
 data class CreateScanRequest(
     val foot: String,
-    val device: Map<String, String?> = emptyMap(),
-    val capture: Map<String, Any?> = mapOf("weight_bearing" to true, "target_fps" to 30),
+    val device: Map<String, Any?> = emptyMap(),
+    val capture: Map<String, Any?> = mapOf("weight_bearing" to true, "target_fps" to 30, "duration_seconds" to 30),
 )
 
 data class CreateScanResponse(
@@ -38,24 +40,29 @@ data class StatusResponse(
     val message: String = "",
     @Json(name = "error_code") val errorCode: String? = null,
     @Json(name = "frame_summary") val frameSummary: Map<String, Any?> = emptyMap(),
+    val stages: List<StageItem> = emptyList(),
 )
 
 data class ProcessRequest(
     @Json(name = "target_frames") val targetFrames: Int = 70,
 )
 
-data class FrameInfo(
-    val index: Int,
-    val filename: String,
-    @Json(name = "thumbnail_url") val thumbnailUrl: String,
-    val sharpness: Double,
+data class BestFrame(
+    val rank: Int,
+    val position: String,
+    val label: String,
+    @Json(name = "image_url") val imageUrl: String,
+    @Json(name = "time_s") val timeS: Double = 0.0,
+    @Json(name = "a4_detected") val a4Detected: Boolean = false,
+    @Json(name = "tilt_deg") val tiltDeg: Double? = null,
+    @Json(name = "quality_score") val qualityScore: Int = 0,
 )
 
 data class FramesResponse(
     @Json(name = "scan_id") val scanId: String,
     @Json(name = "original_frame_count") val originalFrameCount: Int,
     @Json(name = "selected_frame_count") val selectedFrameCount: Int,
-    val frames: List<FrameInfo>,
+    @Json(name = "best_frames") val bestFrames: List<BestFrame> = emptyList(),
 )
 
 interface ScannerApi {
@@ -64,22 +71,35 @@ interface ScannerApi {
 
     @Multipart
     @POST("/api/v1/scans/{scanId}/video")
-    suspend fun uploadVideo(
-        @Path("scanId") scanId: String,
-        @Part file: MultipartBody.Part,
-    ): StatusResponse
+    suspend fun uploadVideo(@Path("scanId") scanId: String, @Part file: MultipartBody.Part): StatusResponse
 
     @POST("/api/v1/scans/{scanId}/process")
-    suspend fun process(
-        @Path("scanId") scanId: String,
-        @Body body: ProcessRequest = ProcessRequest(),
-    ): StatusResponse
+    suspend fun process(@Path("scanId") scanId: String, @Body body: ProcessRequest = ProcessRequest()): StatusResponse
+
+    @POST("/api/v1/scans/{scanId}/measure")
+    suspend fun measure(@Path("scanId") scanId: String): StatusResponse
 
     @GET("/api/v1/scans/{scanId}/status")
     suspend fun status(@Path("scanId") scanId: String): StatusResponse
 
     @GET("/api/v1/scans/{scanId}/frames")
     suspend fun frames(@Path("scanId") scanId: String): FramesResponse
+
+    @GET("/api/v1/scans/{scanId}/result")
+    suspend fun result(@Path("scanId") scanId: String): VideoScanResult
+
+    @GET("/api/v1/scans/{scanId}/mesh.json")
+    suspend fun mesh(@Path("scanId") scanId: String): FootMesh
+
+    @Multipart
+    @POST("/api/v1/guide/frame")
+    suspend fun guideFrame(
+        @Part file: MultipartBody.Part,
+        @Part("view") view: RequestBody,
+        @Part("session_id") sessionId: RequestBody,
+        @Part("focal_mm") focalMm: RequestBody?,
+        @Part("sensor_long_mm") sensorLongMm: RequestBody?,
+    ): GuideResponse
 }
 
 object ApiClient {
@@ -104,6 +124,8 @@ object ApiClient {
 
     fun currentBaseUrl(): String = baseUrl.trimEnd('/')
 
+    fun absolute(path: String): String = currentBaseUrl() + path
+
     private fun buildRetrofit(): Retrofit = Retrofit.Builder()
         .baseUrl(baseUrl)
         .client(okHttp)
@@ -117,8 +139,11 @@ object ApiClient {
     var api: ScannerApi = retrofit.create(ScannerApi::class.java)
         private set
 
-    fun videoPart(file: File): MultipartBody.Part {
-        val body = file.asRequestBody("video/mp4".toMediaType())
-        return MultipartBody.Part.createFormData("file", file.name, body)
-    }
+    fun videoPart(file: File): MultipartBody.Part =
+        MultipartBody.Part.createFormData("file", file.name, file.asRequestBody("video/mp4".toMediaType()))
+
+    fun jpegPart(name: String, bytes: ByteArray): MultipartBody.Part =
+        MultipartBody.Part.createFormData(name, "frame.jpg", bytes.toRequestBody("image/jpeg".toMediaType()))
+
+    fun text(value: Any?): RequestBody? = value?.toString()?.toRequestBody("text/plain".toMediaType())
 }

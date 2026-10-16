@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
@@ -19,6 +20,7 @@ from app.models.schemas import (
 )
 from app.services import storage
 from app.services.pipeline import process_scan_frames
+from app.services.video_measure import measure_scan
 
 router = APIRouter(prefix="/api/v1/scans", tags=["scans"])
 
@@ -36,6 +38,9 @@ def _status_from_meta(meta: dict) -> StatusResponse:
         updated_at=meta.get("updated_at"),
         capture=meta.get("capture") or {},
         frame_summary=meta.get("frame_summary") or {},
+        measurements=meta.get("measurements") or {},
+        quality=meta.get("quality") or {},
+        stages=meta.get("stages") or [],
     )
 
 
@@ -167,8 +172,6 @@ async def get_frames(scan_id: str) -> FramesResponse:
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="Frames not ready yet")
 
-    import json
-
     report = json.loads(report_path.read_text(encoding="utf-8"))
     frames = [
         FrameInfo(
@@ -186,6 +189,7 @@ async def get_frames(scan_id: str) -> FramesResponse:
         original_frame_count=report.get("original_candidate_count", 0),
         selected_frame_count=report.get("selected_frame_count", 0),
         frames=frames,
+        best_frames=_json_file(storage.scan_dir(scan_id) / "best_frames.json") or [],
     )
 
 
@@ -207,31 +211,52 @@ async def delete_scan(scan_id: str) -> dict:
     return {"deleted": scan_id}
 
 
-@router.get("/{scan_id}/result")
-async def get_result(scan_id: str) -> dict:
-    """Milestone 1 placeholder: frame selection summary only."""
+def _json_file(path: Path):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+@router.get("/{scan_id}/best/{name}")
+async def get_best_frame(scan_id: str, name: str) -> FileResponse:
+    path = storage.scan_dir(scan_id) / "best" / Path(name).name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Best frame not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.post("/{scan_id}/measure", response_model=StatusResponse)
+async def measure(scan_id: str, background_tasks: BackgroundTasks) -> StatusResponse:
+    """Step 2: run the measurement agents on the selected frames."""
     try:
         meta = storage.load_meta(scan_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if meta.get("status") != ScanStatus.frames_ready.value:
-        raise HTTPException(status_code=409, detail="Full result not available yet (Milestone 1 = frames only)")
-    frames = await get_frames(scan_id)
-    return {
-        "scan_id": scan_id,
-        "foot": meta.get("foot"),
-        "device": meta.get("device"),
-        "capture": {
-            **(meta.get("capture") or {}),
-            "original_frame_count": frames.original_frame_count,
-            "selected_frame_count": frames.selected_frame_count,
-        },
-        "milestone": 1,
-        "measurements": None,
-        "mesh": None,
-        "frames": [f.model_dump() for f in frames.frames],
-        "quality": {
-            "note": "Reconstruction and metric confidence arrive in later milestones"
-        },
-        "warnings": [],
-    }
+    if meta.get("status") == ScanStatus.processing.value:
+        return _status_from_meta(meta)
+    if not (storage.scan_dir(scan_id) / "frame_selection.json").exists():
+        raise HTTPException(status_code=409, detail="Frames not selected yet — call /process first")
+    meta = storage.set_status(scan_id, ScanStatus.processing, progress=0, stage="queued", message="Measurement queued", extra={"stages": []})
+    background_tasks.add_task(measure_scan, scan_id)
+    return _status_from_meta(meta)
+
+
+@router.get("/{scan_id}/mesh.json")
+async def get_mesh(scan_id: str) -> FileResponse:
+    path = storage.scan_dir(scan_id) / "mesh.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Mesh not available")
+    return FileResponse(path, media_type="application/json")
+
+
+@router.get("/{scan_id}/result")
+async def get_result(scan_id: str) -> dict:
+    """Agent-based measurement result for the scanned foot (values in mm, display in cm)."""
+    try:
+        meta = storage.load_meta(scan_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    result = _json_file(storage.scan_dir(scan_id) / "result_v2.json")
+    if result is None:
+        raise HTTPException(status_code=409, detail="Result not ready yet")
+    return {**result, "capture": {**(meta.get("capture") or {}), **(meta.get("frame_summary") or {})}}
+
+

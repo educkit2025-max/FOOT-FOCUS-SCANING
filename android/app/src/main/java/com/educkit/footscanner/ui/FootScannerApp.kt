@@ -448,6 +448,8 @@ private fun GuidedScanScreen(foot: String, onFinished: (String, LensInfo) -> Uni
                 enabled = permission,
                 onClick = {
                     if (!recording) {
+                        // A new scan replaces any earlier one whose upload never finished; each is ~35 MB.
+                        context.cacheDir.listFiles { f -> f.name.startsWith("scan_") && f.name.endsWith(".mp4") }?.forEach { it.delete() }
                         val out = File(context.cacheDir, "scan_${System.currentTimeMillis()}.mp4")
                         recorder.start(out) { event ->
                             if (event is VideoRecordEvent.Finalize && !event.hasError()) {
@@ -812,7 +814,10 @@ private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) 
                 if (!r.accepted) {
                     NxCard(borderColor = Nx.Red) {
                         Text("Additional scan needed", color = Nx.Red, fontWeight = FontWeight.Bold)
-                        r.retake.flatMap { it.reasons }.distinct().forEach { Text("• $it", color = Nx.Navy, fontSize = 13.sp) }
+                        (foot?.measurements ?: emptyList()).forEach { m ->
+                            Text("• ${m.measurement} — ${if (m.valueMm != null) m.displayValue else "Additional scan required"}", color = Nx.Navy, fontSize = 13.sp)
+                        }
+                        r.retake.flatMap { it.reasons }.distinct().forEach { Text("• $it", color = Nx.Muted, fontSize = 12.sp) }
                     }
                 }
                 Box(
@@ -828,10 +833,10 @@ private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) 
                         FootViewer(
                             mesh = m,
                             state = viewer,
-                            measurements = items,
+                            measurements = foot?.measurements ?: emptyList(),
                             landmarks = foot?.visualization?.landmarks ?: emptyList(),
                             selectedKey = selected,
-                            showLandmarks = tab == "3d" || selected != null,
+                            showLandmarks = selected != null,
                             modifier = Modifier.fillMaxSize(),
                         )
                         Text(
@@ -844,8 +849,8 @@ private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) 
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(Nx.PaleBlue)
                                 .clickable {
-                                    selected = null
-                                    scope.launch { viewer.animateTo(tabPreset(tab, side)) }
+                                    selected = "foot_length"
+                                    scope.launch { viewer.animateTo(presetFor("top", side)) }
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp),
                         )

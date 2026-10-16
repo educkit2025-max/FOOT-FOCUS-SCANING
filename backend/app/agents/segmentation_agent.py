@@ -49,8 +49,15 @@ def segment_top(rect: RectifiedView) -> AgentOutput:
     b_ref = float(np.median(B[bright])) if bright.any() else 128.0
 
     chroma = np.hypot(A - a_ref, B - b_ref)
-    # Soft shadows lower L but keep paper chroma; skin and socks differ in chroma or are much darker.
-    foot = ((chroma > 14.0) & (L < l_ref - 6)) | (L < l_ref - 55)
+    warmth = (A - a_ref) + (B - b_ref)
+    # Shadows lower L and keep or cool the paper colour, even hard cast shadows (L down by ~110); skin of
+    # every tone shifts warm (red/yellow). Strongly coloured socks and near-black socks also count.
+    foot = (
+        ((warmth > 10.0) & (L < l_ref - 6))
+        | ((warmth > 4.0) & (L < l_ref - 55))
+        | ((chroma > 30.0) & (L < l_ref - 25))
+        | (L < l_ref - 140)
+    )
     mask = (foot & inside).astype(np.uint8) * 255
 
     k = max(3, int(round(2.0 * s)) | 1)

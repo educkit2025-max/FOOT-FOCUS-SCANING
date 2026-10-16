@@ -36,6 +36,8 @@ TEMPLATE_MAX = np.array([0.139912, 0.050383, 0.096478])
 TOC_Z_KEEP = (-0.02, 0.8)
 POISSON = {"depth": 8, "samplespernode": 1.5, "iters": 8, "cgdepth": 0, "pointweight": 0}
 TARGET_FACES = 9000
+PAPER_WHITE = 0.92
+COLOUR_EDGE_MIN_PX = 5.0
 
 _MODEL = None
 
@@ -47,6 +49,7 @@ class View:
     toc: np.ndarray  # H x W x 3, 0..1
     normal: np.ndarray  # H x W x 3, network camera frame
     mask: np.ndarray  # H x W bool
+    colour: np.ndarray | None = None  # H x W x 4: white-balanced rgb + distance to the mask edge (px)
     idx: int = 0
     _tree: cKDTree | None = None
     _pix: np.ndarray | None = None
@@ -102,6 +105,26 @@ def _largest_island(mask: np.ndarray) -> np.ndarray:
     return labels == (np.argmax(counts[1:]) + 1)
 
 
+def _paper_gain(img: np.ndarray, mask: np.ndarray) -> np.ndarray | None:
+    """Per-channel gain that makes the white A4 sheet (bright, unsaturated, off-foot) read as white."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    off = (~cv2.dilate(mask.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)) & (img.max(axis=2) > 8)
+    if off.sum() < 2000:
+        return None
+    v = hsv[..., 2].astype(np.float64)
+    paper = off & (hsv[..., 1] < 70) & (v >= np.percentile(v[off], 80))
+    if paper.sum() < 500:
+        return None
+    ref = np.median(img[paper].astype(np.float64), axis=0) / 255.0
+    return np.clip(PAPER_WHITE / np.maximum(ref, 1e-3), 0.8, 3.0)
+
+
+def _colour_layer(img: np.ndarray, mask: np.ndarray, gain: np.ndarray) -> np.ndarray:
+    rgb = np.clip(img.astype(np.float64) / 255.0 * gain, 0, 1)
+    edge = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 3).astype(np.float64)
+    return np.dstack([rgb, edge])
+
+
 def _model(model_path: Path):
     global _MODEL
     if _MODEL is None:
@@ -138,8 +161,14 @@ def predict_views(images_rgb: list[np.ndarray], keys: list[str], model_path: Pat
             if progress:
                 progress(i + 1, len(images_rgb))
     kept = [v for v in views if v.mask.mean() >= MIN_MASK_COVERAGE]
+    imgs = {k: im for k, im in zip(keys, images_rgb)}
+    gains = {v.key: _paper_gain(imgs[v.key], v.mask) for v in kept}
+    found = [g for g in gains.values() if g is not None]
+    fallback = np.median(found, axis=0) if found else np.ones(3)
     for i, v in enumerate(kept):
         v.idx = i
+        g = gains[v.key]
+        v.colour = _colour_layer(imgs[v.key], v.mask, fallback if g is None else g)
     footedness = "right" if votes and np.mean(votes) >= 0.5 else "left"
     return kept, footedness
 
@@ -176,7 +205,7 @@ def find_matches(views: list[View], num_correspondences: int, seed: int = 10) ->
         ids = np.arange(start, start + per_view)
         tocs.append(_bilinear(v.toc, x, y))
         origin.append(np.full(per_view, v.idx))
-        corr.add(ids, origin[-1], np.stack([x, y], 1), _bilinear(v.rgb, x, y), _bilinear(v.normal, x, y))
+        corr.add(ids, origin[-1], np.stack([x, y], 1), _bilinear(v.colour, x, y), _bilinear(v.normal, x, y))
     corr.toc = np.concatenate(tocs)
     origin = np.concatenate(origin)
 
@@ -200,7 +229,7 @@ def find_matches(views: list[View], num_correspondences: int, seed: int = 10) ->
                 continue
             bx = gx[np.arange(len(cid)), best][keep]
             by = gy[np.arange(len(cid)), best][keep]
-            corr.add(cid[keep], np.full(keep.sum(), v.idx), np.stack([bx, by], 1), _bilinear(v.rgb, bx, by), _bilinear(v.normal, bx, by))
+            corr.add(cid[keep], np.full(keep.sum(), v.idx), np.stack([bx, by], 1), _bilinear(v.colour, bx, by), _bilinear(v.normal, bx, by))
     return corr
 
 
@@ -315,7 +344,9 @@ def triangulate(corr: Correspondences, cams: dict[int, dict]) -> dict:
         if not front:
             continue
         pts.append(X)
-        cols.append(rgb[obs].mean(axis=0))
+        # Colour away from the foot outline, where background and paper bleed in.
+        inner = [i for i in obs if rgb[i, 3] >= COLOUR_EDGE_MIN_PX] or obs
+        cols.append(np.median(rgb[inner, :3], axis=0))
         normals.append(n_sum / max(np.linalg.norm(n_sum), 1e-9))
         errs.append(float(np.mean(err)))
         toc.append(corr.toc[int(c[s])])
@@ -384,11 +415,17 @@ def fuse(cloud: dict) -> dict:
         # FOCUS `keep_pointcloud_island`: the piece the point cloud lies closest to overall.
         mesh = min(parts, key=lambda p: cKDTree(p.vertices).query(P)[0].mean())
 
-    if len(mesh.faces) > TARGET_FACES:
-        ms2 = pymeshlab.MeshSet()
-        ms2.add_mesh(pymeshlab.Mesh(mesh.vertices, mesh.faces))
+    ms2 = pymeshlab.MeshSet()
+    ms2.add_mesh(pymeshlab.Mesh(mesh.vertices, mesh.faces))
+    try:
+        # The sole and the ankle cut are never seen; close them so the foot reads as a solid object.
+        ms2.meshing_repair_non_manifold_edges()
+        ms2.meshing_close_holes(maxholesize=100000, newfaceselected=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FOCUS hole closing skipped: %s", exc)
+    if ms2.current_mesh().face_number() > TARGET_FACES:
         ms2.meshing_decimation_quadric_edge_collapse(targetfacenum=TARGET_FACES, preservenormal=True)
-        mesh = trimesh.Trimesh(ms2.current_mesh().vertex_matrix(), ms2.current_mesh().face_matrix(), process=False)
+    mesh = trimesh.Trimesh(ms2.current_mesh().vertex_matrix(), ms2.current_mesh().face_matrix(), process=False)
 
     _, idx = cKDTree(P).query(mesh.vertices, k=6)
     vcol = (np.clip(cols[idx].mean(axis=1), 0, 1) * 255).astype(np.uint8)
@@ -416,7 +453,7 @@ def to_foot_frame(fused: dict, length_mm: float | None, ref_vertices: np.ndarray
     scale = (length_mm / mesh_len) if length_mm else 1000.0
     u = (V[:, 0] - x0) * scale
     v = -(V[:, 1]) * scale
-    z = (V[:, 2] - z0) * scale
+    z = np.maximum((V[:, 2] - z0) * scale, 0.0)
     out = np.column_stack([v, u, z])
     if ref_vertices is not None and len(ref_vertices):
         ref_low = ref_vertices[ref_vertices[:, 2] < 20.0]

@@ -34,6 +34,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -198,7 +199,6 @@ private fun DrawScope.drawMesh(pm: PreparedMesh, proj: Projector, paint: Paint) 
         val a = pm.faces[f * 3]
         val b = pm.faces[f * 3 + 1]
         val c = pm.faces[f * 3 + 2]
-        // View-space normal from screen x, screen up (−y) and depth.
         val ux = sp[b * 3] - sp[a * 3]; val uy = -(sp[b * 3 + 1] - sp[a * 3 + 1]); val uz = sp[b * 3 + 2] - sp[a * 3 + 2]
         val vx = sp[c * 3] - sp[a * 3]; val vy = -(sp[c * 3 + 1] - sp[a * 3 + 1]); val vz = sp[c * 3 + 2] - sp[a * 3 + 2]
         var nx = uy * vz - uz * vy
@@ -206,7 +206,7 @@ private fun DrawScope.drawMesh(pm: PreparedMesh, proj: Projector, paint: Paint) 
         var nz = ux * vy - uy * vx
         val len = sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(1e-6f)
         nx /= len; ny /= len; nz /= len
-        val shade = 0.42f + 0.58f * abs(nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2])
+        val shade = 0.55f + 0.5f * abs(nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2])
         val col = android.graphics.Color.rgb(
             (br * shade).toInt().coerceIn(0, 255),
             (bg * shade).toInt().coerceIn(0, 255),
@@ -238,46 +238,64 @@ private fun DrawScope.drawMesh(pm: PreparedMesh, proj: Projector, paint: Paint) 
 }
 
 private fun DrawScope.drawMeasurements(proj: Projector, items: List<MeasurementVisual>, selected: String?, labelPaint: Paint, bgPaint: Paint) {
+    val placed = mutableListOf<RectF>()
     items.forEach { m ->
         if (m.valueMm == null) return@forEach
         val isSel = m.key == selected
-        if (selected != null && !isSel) return@forEach
         val color = Nx.hex(m.color)
         val width = if (isSel) 7f else 3.5f
         val ring = m.ring
+        var a: Offset? = null
+        var b: Offset? = null
         var labelAt: Offset? = null
         if (!ring.isNullOrEmpty()) {
             val path = Path()
             ring.forEachIndexed { i, p -> val o = proj.offset(p); if (i == 0) path.moveTo(o.x, o.y) else path.lineTo(o.x, o.y) }
             path.close()
-            drawPath(path, color, style = Stroke(width = width))
+            drawPath(path, color.copy(alpha = if (isSel) 1f else 0.55f), style = Stroke(width = width))
+            a = proj.offset(ring.first())
+            b = proj.offset(ring[ring.size / 2])
             labelAt = proj.offset(ring[ring.size / 4])
         } else if (m.startXyz != null && m.endXyz != null) {
-            val a = proj.offset(m.startXyz)
-            val b = proj.offset(m.endXyz)
-            drawLine(color, a, b, strokeWidth = width)
-            drawCircle(color, radius = width + 3f, center = a)
-            drawCircle(color, radius = width + 3f, center = b)
-            labelAt = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+            val sa = proj.offset(m.startXyz)
+            val sb = proj.offset(m.endXyz)
+            a = sa
+            b = sb
+            drawLine(color.copy(alpha = if (isSel) 1f else 0.7f), sa, sb, strokeWidth = width)
+            drawCircle(color, radius = width + 3f, center = sa)
+            drawCircle(color, radius = width + 3f, center = sb)
+            labelAt = Offset((sa.x + sb.x) / 2f, (sa.y + sb.y) / 2f)
         }
-        if (isSel && labelAt != null) drawLabel(m.displayValue, labelAt, color, labelPaint, bgPaint)
+        val facing = a != null && b != null && hypot(b.x - a.x, b.y - a.y) >= 36f
+        if (labelAt != null && (isSel || facing)) {
+            val rect = labelRect(m.displayValue, labelAt, labelPaint)
+            val padded = RectF(rect).apply { inset(-6f, -6f) }
+            if (!isSel && placed.any { RectF.intersects(it, padded) }) return@forEach
+            placed += padded
+            drawLabel(m.displayValue, labelAt, color, isSel, labelPaint, bgPaint)
+        }
     }
 }
 
-private fun DrawScope.drawLabel(text: String, at: Offset, color: Color, textPaint: Paint, bgPaint: Paint) {
+private fun labelRect(text: String, at: Offset, paint: Paint): RectF {
+    val w = paint.measureText(text)
+    return RectF(at.x - w / 2 - 18f, at.y - 64f, at.x + w / 2 + 18f, at.y - 14f)
+}
+
+private fun DrawScope.drawLabel(text: String, at: Offset, color: Color, selected: Boolean, textPaint: Paint, bgPaint: Paint) {
     drawIntoCanvas { c ->
         val nc = c.nativeCanvas
-        val w = textPaint.measureText(text)
-        val rect = RectF(at.x - w / 2 - 18f, at.y - 64f, at.x + w / 2 + 18f, at.y - 14f)
+        val rect = labelRect(text, at, textPaint)
+        bgPaint.style = Paint.Style.FILL
         bgPaint.color = android.graphics.Color.WHITE
         nc.drawRoundRect(rect, 24f, 24f, bgPaint)
         bgPaint.color = color.toArgb()
         bgPaint.style = Paint.Style.STROKE
-        bgPaint.strokeWidth = 3f
+        bgPaint.strokeWidth = if (selected) 3.5f else 2.5f
         nc.drawRoundRect(rect, 24f, 24f, bgPaint)
         bgPaint.style = Paint.Style.FILL
         textPaint.color = Nx.Navy.toArgb()
-        nc.drawText(text, at.x - w / 2, at.y - 27f, textPaint)
+        nc.drawText(text, at.x - textPaint.measureText(text) / 2, at.y - 27f, textPaint)
     }
 }
 

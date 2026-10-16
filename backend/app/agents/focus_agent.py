@@ -56,6 +56,11 @@ def run(scan_root: Path, frame_records: list[dict], side: str, length_mm: float 
     calibrated = res["scale_source"] == "a4_foot_length"
     coverage = stats["views_calibrated"] / max(stats["frames"], 1)
     msgs = [] if calibrated else ["3D shape is not to scale — A4 sheet was not measured from above"]
+    if stats["views_calibrated"] < 10:
+        msgs.append(
+            f"3D shape is rough — only {stats['views_calibrated']} of {stats['views_with_foot']} views could be placed; "
+            "move the phone slowly and keep the whole foot in view"
+        )
     if stats["footedness_predicted"] != side:
         msgs.append(f"The 3D model thinks this is a {stats['footedness_predicted']} foot — check the selected foot")
     data = {

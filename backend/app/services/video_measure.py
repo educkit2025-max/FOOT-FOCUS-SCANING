@@ -306,12 +306,17 @@ def _measure(scan_id: str, stages: _Stages) -> dict:
 
     stages.enter("colour_3d")
     display_mesh = mesh
+    footprint = mesh
+    if footprint is None and top_rec and top_rec.get("outline_uv"):
+        # Without the hull, line the colour mesh up with the A4 top outline the measurement lines use.
+        rows = top_rec["outline_uv"]
+        footprint = {"vertices": [[r[1], r[0], 0.0] for r in rows] + [[r[2], r[0], 0.0] for r in rows]}
     colour = focus_agent.run(
         root,
         frames,
         foot,
         L,
-        mesh,
+        footprint,
         cam_meta["focal_mm"],
         cam_meta["sensor_long_mm"],
         progress=lambda i, n: stages.detail(0.7 * i / n, f"Building colour 3D foot — frame {i} of {n}"),

@@ -770,13 +770,18 @@ private fun tabPreset(tab: String, side: String): CameraPreset = when (tab) {
     else -> presetFor("oblique", side)
 }
 
-private fun statusLabel(status: String): String = when (status) {
+private fun statusLabel(status: String): String? = when (status) {
     "final" -> "Final"
     "estimated" -> "Estimated"
-    else -> "Additional scan required"
+    else -> null
 }
 
-private fun cm(v: Double?): String = v?.let { "%.1f".format(it) } ?: "—"
+private fun cmInt(v: Double?): String? = v?.let { kotlin.math.round(it).toInt().toString() }
+
+private fun sizeText(m: MeasurementVisual): String =
+    m.displayValue.takeIf { it.isNotBlank() && it != "—" && !it.contains("scan", ignoreCase = true) }
+        ?: m.valueMm?.let { if (m.key == "foot_volume") "${kotlin.math.round(it / 1000.0).toInt()} cm³" else "${kotlin.math.round(it / 10.0).toInt()} cm" }
+        ?: "—"
 
 @Composable
 private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) {
@@ -807,19 +812,6 @@ private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) 
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SummaryTile("Foot length", r.summary?.lengthCm, r.summary?.lengthStatus, Modifier.weight(1f))
-                    SummaryTile("Foot width", r.summary?.widthCm, r.summary?.widthStatus, Modifier.weight(1f))
-                }
-                if (!r.accepted) {
-                    NxCard(borderColor = Nx.Red) {
-                        Text("Additional scan needed", color = Nx.Red, fontWeight = FontWeight.Bold)
-                        (foot?.measurements ?: emptyList()).forEach { m ->
-                            Text("• ${m.measurement} — ${if (m.valueMm != null) m.displayValue else "Additional scan required"}", color = Nx.Navy, fontSize = 13.sp)
-                        }
-                        r.retake.flatMap { it.reasons }.distinct().forEach { Text("• $it", color = Nx.Muted, fontSize = 12.sp) }
-                    }
-                }
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -863,6 +855,16 @@ private fun FootResultScreen(result: VideoScanResult?, onScanAgain: () -> Unit) 
                                 .align(Alignment.Center)
                                 .padding(24.dp),
                         )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SummaryTile("Foot length", r.summary?.lengthCm, r.summary?.lengthStatus, Modifier.weight(1f))
+                    SummaryTile("Foot width", r.summary?.widthCm, r.summary?.widthStatus, Modifier.weight(1f))
+                }
+                NxCard {
+                    Text("Measurements", color = Nx.Navy, fontWeight = FontWeight.Bold)
+                    (foot?.measurements ?: emptyList()).forEach { m ->
+                        Text("• ${m.measurement} — ${sizeText(m)}", color = Nx.Navy, fontSize = 13.sp)
                     }
                 }
                 foot?.let { fr ->
@@ -932,8 +934,8 @@ private fun SummaryTile(title: String, valueCm: Double?, status: String?, modifi
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(title, color = Nx.Muted, fontSize = 13.sp)
-        Text(if (valueCm != null) "${cm(valueCm)} cm" else "—", color = if (valueCm != null) Nx.Navy else Nx.Muted, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        status?.let { StatusPill(statusLabel(it), Nx.state(it)) }
+        Text(cmInt(valueCm)?.let { "$it cm" } ?: "—", color = if (valueCm != null) Nx.Navy else Nx.Muted, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        statusLabel(status ?: "")?.let { StatusPill(it, Nx.state(status ?: "")) }
     }
 }
 
@@ -959,23 +961,22 @@ private fun MeasurementRow(m: MeasurementVisual, selected: Boolean, onClick: () 
             ) { Text(m.number.toString(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
             Text(m.measurement, color = Nx.Navy, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             Text(
-                if (m.valueMm != null) m.displayValue else "—",
+                sizeText(m),
                 color = if (m.valueMm != null) Nx.MeasureBlue else Nx.Muted,
                 fontWeight = FontWeight.Bold,
                 fontSize = 17.sp,
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StatusPill(statusLabel(m.status), Nx.state(m.status))
+            statusLabel(m.status)?.let { StatusPill(it, Nx.state(m.status)) }
             if (m.valueMm != null) Text("Confidence ${"%.0f".format(m.confidence * 100)}%", color = Nx.Muted, fontSize = 12.sp)
         }
         if (selected && m.startLandmark != null && m.valueMm != null && m.startLandmark != m.endLandmark) {
             Text(
-                "From ${m.startLandmark.replace('_', ' ')} to ${m.endLandmark?.replace('_', ' ')} = ${m.displayValue}",
+                "From ${m.startLandmark.replace('_', ' ')} to ${m.endLandmark?.replace('_', ' ')} = ${sizeText(m)}",
                 color = Nx.Navy,
                 fontSize = 12.sp,
             )
         }
-        if (m.status == "additional_scan_required" && m.reason != null) Text(m.reason, color = Nx.Red, fontSize = 12.sp)
     }
 }

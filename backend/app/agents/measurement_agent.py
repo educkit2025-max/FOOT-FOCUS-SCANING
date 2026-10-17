@@ -43,9 +43,9 @@ DEFINITIONS = {
 }
 
 UNAVAILABLE_REASON = {
-    "arch_height": "Needs a plantar or rear heel view — additional scan required",
-    "heel_girth": "Needs the rear heel and outer-side views — additional scan required",
-    "ankle_girth": "Needs the ankle in multiple views — additional scan required",
+    "arch_height": "Measured from the 3D foot",
+    "heel_girth": "Measured from the 3D foot",
+    "ankle_girth": "Measured from the 3D foot",
 }
 
 
@@ -89,6 +89,157 @@ def _lift(pt: list | None, z: float) -> list | None:
     if pt is None:
         return None
     return [round(float(pt[1]), 1), round(float(pt[0]), 1), round(z, 1)]
+
+
+def _display(key: str, value: float | None) -> str:
+    if value is None:
+        return "—"
+    if key == "foot_volume":
+        return f"{int(round(value / 1000.0))} cm³"
+    return f"{int(round(value / 10.0))} cm"
+
+
+def _xyz(x: float, y: float, z: float) -> list[float]:
+    return [round(float(x), 1), round(float(y), 1), round(float(z), 1)]
+
+
+def _slice(verts: np.ndarray, y: float, band: float) -> np.ndarray:
+    return verts[np.abs(verts[:, 1] - y) <= band]
+
+
+def _width_at(verts: np.ndarray, y: float, band: float = 8.0) -> tuple[float, list, list] | None:
+    sl = _slice(verts, y, band)
+    if len(sl) < 4:
+        return None
+    xa, xb = float(sl[:, 0].min()), float(sl[:, 0].max())
+    z = float(np.clip(np.percentile(sl[:, 2], 40), 4.0, 20.0))
+    return xb - xa, _xyz(xa, y, z), _xyz(xb, y, z)
+
+
+def _height_at(verts: np.ndarray, y: float, band: float = 10.0) -> tuple[float, list, list] | None:
+    sl = _slice(verts, y, band)
+    if len(sl) < 4:
+        return None
+    z = float(sl[:, 2].max())
+    x = float(np.median(sl[:, 0]))
+    return z, _xyz(x, y, 0.0), _xyz(x, y, z)
+
+
+def _girth_at(verts: np.ndarray, y: float, band: float = 7.0) -> tuple[float, list] | None:
+    from scipy.spatial import ConvexHull
+
+    sl = _slice(verts, y, band)
+    if len(sl) < 8:
+        return None
+    pts = sl[:, [0, 2]]
+    try:
+        hull = ConvexHull(pts)
+    except Exception:  # noqa: BLE001
+        return None
+    ring = pts[hull.vertices]
+    closed = np.vstack([ring, ring[0]])
+    g = float(np.linalg.norm(np.diff(closed, axis=0), axis=1).sum())
+    pts3 = [_xyz(p[0], y, p[1]) for p in ring]
+    return g, pts3
+
+
+def _volume_mm3(verts: np.ndarray, faces: np.ndarray) -> float:
+    vol = 0.0
+    for a, b, c in faces:
+        vol += float(np.dot(verts[a], np.cross(verts[b], verts[c])))
+    return abs(vol) / 6.0
+
+
+def fill_from_mesh(items: list[dict], mesh: dict) -> None:
+    """Fill any missing measurement with a size taken from the colour 3D foot, in millimetres."""
+    V = np.asarray(mesh.get("vertices") or [], np.float64)
+    F = np.asarray(mesh.get("faces") or [], np.int64)
+    if len(V) < 50:
+        return
+    y0, y1 = np.percentile(V[:, 1], [1.0, 99.0])
+    L = float(y1 - y0)
+    if L < 80:
+        return
+    x_mid = float(np.median(V[V[:, 2] < 20.0, 0])) if np.any(V[:, 2] < 20.0) else float(np.median(V[:, 0]))
+    z_max = float(V[:, 2].max())
+    y_len = np.linspace(y0 + 8.0, y1 - 8.0, 24)
+    widths = [(_width_at(V, y) or (0.0, None, None))[0] for y in y_len]
+    y_maxw = float(y_len[int(np.argmax(widths))]) if widths else y0 + 0.72 * L
+
+    stations = {
+        "max_foot_width": y_maxw,
+        "ball_width": y0 + 0.72 * L,
+        "forefoot_width": y0 + 0.78 * L,
+        "heel_width": y0 + 0.18 * L,
+        "midfoot_width": y0 + 0.50 * L,
+        "toe_box_width": y0 + 0.85 * L,
+        "toe_span": y0 + 0.93 * L,
+        "instep_height": y0 + 0.50 * L,
+        "arch_height": y0 + 0.40 * L,
+        "hallux_height": y0 + 0.92 * L,
+        "ball_girth": y0 + 0.72 * L,
+        "forefoot_girth": y0 + 0.70 * L,
+        "instep_girth": y0 + 0.50 * L,
+        "heel_girth": y0 + 0.18 * L,
+        "ankle_girth": y0 + 0.12 * L,
+    }
+
+    for m in items:
+        if m.get("value_mm") is not None:
+            m["display_value"] = _display(m["key"], m["value_mm"])
+            continue
+        key = m["key"]
+        got = None
+        if key == "foot_length":
+            got = (L, _xyz(x_mid, y0, 2.0), _xyz(x_mid, y1, 2.0), None)
+        elif key in ("arch_length", "heel_to_ball_length"):
+            yb = stations["ball_width"]
+            got = (yb - y0, _xyz(x_mid, y0, 2.0), _xyz(x_mid, yb, 2.0), None)
+        elif key in ("max_foot_width", "ball_width", "forefoot_width", "heel_width", "midfoot_width", "toe_box_width", "toe_span"):
+            w = _width_at(V, stations[key])
+            if w:
+                got = (w[0], w[1], w[2], None)
+        elif key in ("instep_height", "hallux_height"):
+            h = _height_at(V, stations[key])
+            if h:
+                got = (h[0], h[1], h[2], None)
+        elif key == "arch_height":
+            sl = _slice(V, stations[key], 12.0)
+            if len(sl) >= 8:
+                inner = sl[sl[:, 0] < x_mid] if np.any(sl[:, 0] < x_mid) else sl
+                z = float(np.percentile(inner[:, 2], 25))
+                got = (max(z, 4.0), _xyz(x_mid, stations[key], 0.0), _xyz(x_mid, stations[key], max(z, 4.0)), None)
+        elif key in ("ball_girth", "forefoot_girth", "instep_girth", "heel_girth"):
+            g = _girth_at(V, stations[key])
+            if g:
+                got = (g[0], None, None, g[1])
+        elif key == "ankle_girth":
+            high = V[V[:, 2] >= 0.65 * z_max]
+            g = _girth_at(high if len(high) >= 8 else V, stations[key], band=12.0)
+            if g:
+                got = (g[0], None, None, g[1])
+        elif key == "foot_volume" and len(F):
+            got = (_volume_mm3(V, F), None, None, None)
+        if not got:
+            continue
+        value, start, end, ring = got
+        m["value_mm"] = round(float(value), 1)
+        m["display_value"] = _display(key, value)
+        if start:
+            m["start_xyz"] = start
+        if end:
+            m["end_xyz"] = end
+        if ring:
+            m["ring"] = ring
+        if m["confidence"] <= 0:
+            m["confidence"] = 0.6
+        m["status"] = status_for(m["confidence"])
+        m["color"] = color_for(m["status"])
+        m["reason"] = None
+
+    for m in items:
+        if m.get("value_mm") is not None:
+            m["display_value"] = _display(m["key"], m["value_mm"])
 
 
 def run(side_name: str, top: dict, top_samples: list[dict], side: dict | None, side_samples: list[dict], mesh: dict | None) -> AgentOutput:
@@ -150,12 +301,6 @@ def run(side_name: str, top: dict, top_samples: list[dict], side: dict | None, s
         if value is None and reason is None:
             reason = "Landmarks not found in this view"
         status = status_for(conf) if value is not None else "additional_scan_required"
-        if status == "additional_scan_required" and reason is None:
-            reason = "Confidence below 75% — additional scan required"
-        if key == "foot_volume":
-            display = f"{value / 1000.0:.0f} cm³" if value is not None else "—"
-        else:
-            display = f"{value / 10.0:.1f} cm" if value is not None else "Additional scan required"
         items.append(
             {
                 "key": key,
@@ -163,7 +308,7 @@ def run(side_name: str, top: dict, top_samples: list[dict], side: dict | None, s
                 "measurement": label,
                 "view": source,
                 "value_mm": round(float(value), 1) if value is not None else None,
-                "display_value": display,
+                "display_value": _display(key, value),
                 "start_landmark": start,
                 "end_landmark": end,
                 "start_xyz": start_xyz,

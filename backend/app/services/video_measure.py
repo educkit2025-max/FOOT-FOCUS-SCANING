@@ -332,6 +332,8 @@ def _measure(scan_id: str, stages: _Stages) -> dict:
     stages.enter("measurement")
     meas = measurement_agent.run(foot, top_rec, top_ok, side_rec, side_ok, mesh)
     items = meas.data["measurements"]
+    if display_mesh:
+        measurement_agent.fill_from_mesh(items, display_mesh)
     if top_rec is None:
         for m in items:
             if m["value_mm"] is None and m["view"] in ("top", "side", "girth", "3d"):
@@ -342,7 +344,7 @@ def _measure(scan_id: str, stages: _Stages) -> dict:
     qc = quality_agent.run_single(foot, top, side, {"measurements": items, "raw": raw})
 
     stages.enter("visualization")
-    vis = visualization_agent.run(foot, top_rec, side_rec, items, mesh).data if top_rec else None
+    vis = visualization_agent.run(foot, top_rec, side_rec, items, display_mesh or mesh).data
 
     stages.enter("footwear_fit")
     fit = footwear_fit_agent.run(foot, items)
@@ -360,8 +362,8 @@ def _measure(scan_id: str, stages: _Stages) -> dict:
         "retake": qc.data["retake"],
         "warnings": qc.data["warnings"],
         "summary": {
-            "length_cm": round(length["value_mm"] / 10, 1) if length.get("value_mm") else None,
-            "width_cm": round(width["value_mm"] / 10, 1) if width.get("value_mm") else None,
+            "length_cm": int(round(length["value_mm"] / 10)) if length.get("value_mm") else None,
+            "width_cm": int(round(width["value_mm"] / 10)) if width.get("value_mm") else None,
             "length_status": length.get("status"),
             "width_status": width.get("status"),
             "scan_confidence": round(min(essentials), 3) if essentials else 0.0,

@@ -39,10 +39,19 @@ def run(side: str, top: dict, side_view: dict | None, measurements: list[dict], 
         if key in LANDMARK_LABELS:
             landmarks.append({"id": key, "index": len(landmarks) + 1, "label": LANDMARK_LABELS[key], "xyz": [uv[1], uv[0], 0.0]})
     if side_view:
+        lm = (top or {}).get("landmarks_mm") or {}
+        mid = lm.get("midfoot_a"), lm.get("midfoot_b")
+        mid_v = float(np.mean([mid[0][1], mid[1][1]])) if None not in mid else 0.0
         for key, uh in side_view.get("landmarks_mm", {}).items():
             if key in LANDMARK_LABELS:
-                mid_v = float(np.mean([top["landmarks_mm"]["midfoot_a"][1], top["landmarks_mm"]["midfoot_b"][1]]))
                 landmarks.append({"id": key, "index": len(landmarks) + 1, "label": LANDMARK_LABELS[key], "xyz": [round(mid_v, 1), uh[0], uh[1]]})
+    if not landmarks:
+        length = next((m for m in measurements if m["key"] == "foot_length" and m.get("start_xyz") and m.get("end_xyz")), None)
+        if length:
+            landmarks = [
+                {"id": "posterior_heel", "index": 1, "label": "Heel", "xyz": length["start_xyz"]},
+                {"id": "longest_toe", "index": 2, "label": "Longest toe", "xyz": length["end_xyz"]},
+            ]
     data = {
         "side": side,
         "units": "mm",
